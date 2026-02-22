@@ -1,0 +1,14 @@
+pandas
+numpy
+pyarrow
+fastparquet
+
+scikit-learn
+matplotlib
+seaborn
+
+tqdm
+pyyaml
+loguru
+
+torch
