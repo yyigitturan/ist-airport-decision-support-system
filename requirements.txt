@@ -12,3 +12,6 @@ pyyaml
 loguru
 
 torch
+
+pymap3d
+rdp
