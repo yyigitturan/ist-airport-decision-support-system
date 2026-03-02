@@ -18,7 +18,8 @@ uv.lock
 
 docs/
 ./docs
-./data_arch.drawio
+.data_arch.drawio
+.$data_arch.drawio.bkp
 # =========================
 # Python
 # =========================
