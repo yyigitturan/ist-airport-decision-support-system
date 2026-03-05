@@ -15,5 +15,3 @@ torch
 
 pymap3d
 rdp
-
-osmnx
