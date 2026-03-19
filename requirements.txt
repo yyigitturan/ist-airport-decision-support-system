@@ -18,3 +18,9 @@ rdp
 
 polars
 umap-learn
+
+transformers 
+accelerate 
+safetensors 
+sentencepiece 
+scikit-learn
