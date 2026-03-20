@@ -10,7 +10,7 @@ class TrainConfig:
     model_name:   str = "Qwen/Qwen2.5-0.5B-Instruct"
     target_col:   str = "label_post_terminal_min"
 
-    scale_target: bool = True
+    scale_target: bool = False
 
     traj_dim:                   int = 256
     llm_hidden_dim:             int = 896

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import torch
-from torch.nn import SmoothL1Loss
+from torch.nn import MSELoss
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -41,10 +41,7 @@ def _flush_optimizer(optimizer, scheduler, model, max_grad_norm: float = 1.0) ->
 
 
 def _resolve_device(cfg: TrainConfig) -> torch.device:
-    """
-    "auto" → CUDA > MPS > CPU öncelik sırası.
-    "cuda" / "mps" açık seçimde önce availability kontrol edilir, yoksa CPU'ya düşer.
-    """
+
     if cfg.device == "auto":
         if torch.cuda.is_available():
             return torch.device("cuda")
@@ -164,7 +161,8 @@ def train_one_month(cfg: TrainConfig, month_dir: Path, tokenizer) -> dict:
         num_training_steps=total_steps,
     )
 
-    loss_fn = SmoothL1Loss()
+    # MSE — uç değerleri SmoothL1'e göre daha sert cezalandırır
+    loss_fn = MSELoss()
 
     best_val_mae = float("inf")
     best_epoch   = 0
@@ -173,6 +171,9 @@ def train_one_month(cfg: TrainConfig, month_dir: Path, tokenizer) -> dict:
 
     month_out = cfg.output_root_path / month_dir.name
     ensure_dir(month_out)
+
+    print(f"\n  train={len(train_ds)} | valid={len(valid_ds)} | test={len(test_ds)}")
+    print(f"  device={device} | steps/epoch={steps_per_epoch} | total_steps={total_steps}\n")
 
     # ── Train loop ───────────────────────────────
     for epoch in range(cfg.num_epochs):
@@ -184,7 +185,7 @@ def train_one_month(cfg: TrainConfig, month_dir: Path, tokenizer) -> dict:
 
         pbar = tqdm(
             train_loader,
-            desc=f"{month_dir.name} epoch {epoch + 1}/{cfg.num_epochs}",
+            desc=f"[{month_dir.name}] epoch {epoch + 1}/{cfg.num_epochs}",
         )
 
         for step, batch in enumerate(pbar, start=1):
@@ -213,26 +214,33 @@ def train_one_month(cfg: TrainConfig, month_dir: Path, tokenizer) -> dict:
             if step % cfg.grad_accum_steps == 0:
                 _flush_optimizer(optimizer, scheduler, model)
 
-            pbar.set_postfix(train_loss=running_loss / steps)
+            pbar.set_postfix(train_loss=f"{running_loss / steps:.4f}")
 
         # Epoch sonu — kalan gradient'ları flush et
         if steps % cfg.grad_accum_steps != 0:
             _flush_optimizer(optimizer, scheduler, model)
+
+        train_loss_avg = running_loss / max(steps, 1)
 
         # ── Validation ───────────────────────────
         val_pred, val_true = predict_epoch(model, valid_loader, scaler, device)
         val_metrics = regression_metrics(val_true, val_pred)
 
         history.append({
-            "epoch":      epoch + 1,
-            "train_loss": running_loss / max(steps, 1),
+            "epoch":     epoch + 1,
+            "train_mse": train_loss_avg,
             **{f"val_{k}": v for k, v in val_metrics.items()},
         })
 
+        # Epoch özet satırı — train + val yan yana
         print(
-            f"[{month_dir.name}] epoch {epoch + 1} | "
-            f"train_loss={running_loss / max(steps, 1):.4f} | "
-            f"val_mae={val_metrics['mae']:.4f}"
+            f"  epoch {epoch + 1}/{cfg.num_epochs} | "
+            f"train_mse={train_loss_avg:.4f} | "
+            f"val_mse={val_metrics['mse']:.4f} | "
+            f"val_mae={val_metrics['mae']:.4f} | "
+            f"val_rmse={val_metrics['rmse']:.4f} | "
+            f"val_r2={val_metrics['r2']:.4f} | "
+            f"val_within_2min={val_metrics['within_2min_pct']:.1f}%"
         )
 
         # ── Checkpoint & early stopping ──────────
@@ -242,19 +250,19 @@ def train_one_month(cfg: TrainConfig, month_dir: Path, tokenizer) -> dict:
             patience     = 0
 
             torch.save(model.state_dict(), month_out / "best_model.pt")
-            dump_json(dataclasses.asdict(cfg),  month_out / "best_config.json")
-            dump_json(val_metrics,              month_out / "best_val_metrics.json")
+            dump_json(dataclasses.asdict(cfg),    month_out / "best_config.json")
+            dump_json(val_metrics,                month_out / "best_val_metrics.json")
             dump_json({"best_epoch": best_epoch}, month_out / "best_epoch.json")
             scaler.save(month_out / "scaler.json")
+            print(f"  ✓ checkpoint kaydedildi (val_mae={best_val_mae:.4f})")
         else:
             patience += 1
+            print(f"  patience {patience}/{cfg.early_stopping_patience}")
             if patience >= cfg.early_stopping_patience:
-                print(f"Early stopping — epoch {epoch + 1}")
+                print(f"  early stopping — epoch {epoch + 1}")
                 break
 
     # ── Test ─────────────────────────────────────
-    # weights_only=True: sadece state_dict tensor'ları yüklenir, güvenli.
-    # Eski PyTorch sürümlerinde bu parametre yoksa sessizce kaldırılır.
     try:
         state = torch.load(
             month_out / "best_model.pt",
@@ -262,13 +270,18 @@ def train_one_month(cfg: TrainConfig, month_dir: Path, tokenizer) -> dict:
             weights_only=True,
         )
     except TypeError:
-        # PyTorch < 1.13 weights_only desteklemiyor
         state = torch.load(month_out / "best_model.pt", map_location=device)
 
     model.load_state_dict(state)
 
     test_pred, test_true = predict_epoch(model, test_loader, scaler, device)
     test_metrics = regression_metrics(test_true, test_pred)
+
+    # Test özet
+    print(f"\n  ── TEST [{month_dir.name}] ──")
+    print(f"  mse={test_metrics['mse']:.4f} | mae={test_metrics['mae']:.4f} | rmse={test_metrics['rmse']:.4f} | r2={test_metrics['r2']:.4f}")
+    print(f"  within_2min={test_metrics['within_2min_pct']:.1f}% | within_5min={test_metrics['within_5min_pct']:.1f}%")
+    print(f"  mean_bias={test_metrics['mean_bias']:.4f} | spearman_r={test_metrics['spearman_r']:.4f}\n")
 
     pd.DataFrame(history).to_csv(month_out / "history.csv", index=False)
     pd.DataFrame({"y_true": test_true, "y_pred": test_pred}).to_csv(
@@ -295,15 +308,14 @@ def train_all_months(cfg: TrainConfig) -> pd.DataFrame:
     results = []
 
     for month_dir in month_dirs:
-        print("=" * 80)
-        print(f"TRAINING MONTH: {month_dir.name}")
-        print("=" * 80)
+        print("=" * 70)
+        print(f"  TRAINING MONTH: {month_dir.name}")
+        print("=" * 70)
 
         try:
             res = train_one_month(cfg, month_dir, tokenizer)
             results.append(res)
         except Exception:
-            # Tam stack trace — sadece mesaj değil
             print(f"[ERROR] {month_dir.name}:")
             traceback.print_exc()
 
@@ -323,5 +335,9 @@ def train_all_months(cfg: TrainConfig) -> pd.DataFrame:
             "mean_r2":   float(results_df["r2"].mean()),
         }
         dump_json(summary, cfg.output_root_path / "summary.json")
+        print("\n  ── ÖZET ──")
+        print(f"  mean_mae={summary['mean_mae']:.4f} | mean_rmse={summary['mean_rmse']:.4f} | mean_r2={summary['mean_r2']:.4f}")
 
     return results_df
+
+
