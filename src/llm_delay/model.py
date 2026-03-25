@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM
+from transformers import AutoModel
 
 
 # ─────────────────────────────────────────────
@@ -10,6 +10,10 @@ from transformers import AutoModelForCausalLM
 # ─────────────────────────────────────────────
 
 class CrossModalityAdapter(nn.Module):
+    """
+    Trajectory embedding'ini LLM hidden space'e projekte eder.
+    in_dim (traj_dim) → out_dim (llm hidden_size)
+    """
     def __init__(self, in_dim: int, out_dim: int, dropout: float = 0.1):
         super().__init__()
         self.net = nn.Sequential(
@@ -30,6 +34,10 @@ class CrossModalityAdapter(nn.Module):
 # ─────────────────────────────────────────────
 
 class RegressionHead(nn.Module):
+    """
+    LLM son token hidden state'inden skaler tahmin üretir.
+    hidden_size → hidden_size/2 → 1
+    """
     def __init__(self, hidden_size: int, dropout: float = 0.1):
         super().__init__()
         self.net = nn.Sequential(
@@ -51,6 +59,24 @@ class RegressionHead(nn.Module):
 # ─────────────────────────────────────────────
 
 class LLMDelayRegressor(nn.Module):
+    """
+    LLM tabanlı uçuş gecikme regresyon modeli.
+
+    Mimari:
+        - AutoModel (backbone) — LM head yüklenmez, sadece encoder/decoder stack
+        - CrossModalityAdapter — trajectory emb → LLM hidden space
+        - RegressionHead — son token hidden state → skaler tahmin
+
+    Frozen strateji:
+        - backbone parametreleri dondurulur (requires_grad=False)
+        - adapter ve reg_head train edilir
+
+    Summary stratejisi:
+        Causal LLM için son geçerli token hidden state'i kullanılır.
+        Son token kendinden önceki tüm sekansı görmüş olur.
+        Alternatif (ileride ablation): mean pooling, özel [REG] token.
+    """
+
     def __init__(
         self,
         model_name: str,
@@ -61,27 +87,36 @@ class LLMDelayRegressor(nn.Module):
     ):
         super().__init__()
 
-        self.llm = AutoModelForCausalLM.from_pretrained(
+        # AutoModel kullanıyoruz — AutoModelForCausalLM'den farkı:
+        # LM head (vocab_size projeksiyon katmanı) yüklenmez.
+        # Sadece hidden state lazım, generation yapmıyoruz.
+        # Bellek tasarrufu: ~hidden_size × vocab_size parametre.
+        self.llm = AutoModel.from_pretrained(
             model_name,
             torch_dtype=torch.float32,
             low_cpu_mem_usage=True,
         )
         self.llm.config.use_cache = False
 
+        # Backbone dondurulur
         for p in self.llm.parameters():
             p.requires_grad = False
 
-        hidden_size = self.llm.get_input_embeddings().weight.shape[1]
+        # Hidden size doğrulaması
+        hidden_size = self.llm.config.hidden_size
         if llm_hidden_dim is not None and hidden_size != llm_hidden_dim:
             raise ValueError(
                 f"Config llm_hidden_dim={llm_hidden_dim} ama "
-                f"model hidden_size={hidden_size} — uyuşmuyor."
+                f"model hidden_size={hidden_size} — uyuşmuyor. "
+                f"Config'i güncelleyin: llm_hidden_dim={hidden_size}"
             )
 
         self.input_embeddings = self.llm.get_input_embeddings()
         self.adapter  = CrossModalityAdapter(traj_dim, hidden_size, dropout=adapter_dropout)
         self.reg_head = RegressionHead(hidden_size, dropout=head_dropout)
-        self._backbone = self.llm.model
+
+        # AutoModel ile self.llm direkt backbone — .model erişimine gerek yok
+        self._backbone = self.llm
 
     def _embed_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Token id'leri embedding vektörlerine çevirir. [B, L] → [B, L, H]"""
@@ -89,20 +124,21 @@ class LLMDelayRegressor(nn.Module):
 
     def forward(
         self,
-        prompt_ids:    torch.Tensor,          # [B, text_len]
-        st1_ids:       torch.Tensor,          # [B, s1]
-        st2_ids:       torch.Tensor,          # [B, s2]
-        st3_ids:       torch.Tensor,          # [B, s3]
-        st4_ids:       torch.Tensor,          # [B, s4]
-        focusing_emb:  torch.Tensor,          # [B, traj_dim]
-        active_embs:   torch.Tensor,          # [B, max_active, traj_dim]
-        prior_embs:    torch.Tensor,          # [B, max_prior,  traj_dim]
-        active_mask:   torch.Tensor,          # [B, max_active]  bool
-        prior_mask:    torch.Tensor,          # [B, max_prior]   bool
-        prompt_attention_mask: torch.Tensor | None = None,
-
-    ) -> torch.Tensor:                        # [B]
-
+        prompt_ids:   torch.Tensor,   # [B, text_len]
+        st1_ids:      torch.Tensor,   # [B, s1]
+        st2_ids:      torch.Tensor,   # [B, s2]
+        st3_ids:      torch.Tensor,   # [B, s3]
+        st4_ids:      torch.Tensor,   # [B, s4]
+        focusing_emb: torch.Tensor,   # [B, traj_dim]
+        active_embs:  torch.Tensor,   # [B, max_active, traj_dim]
+        prior_embs:   torch.Tensor,   # [B, max_prior,  traj_dim]
+        active_mask:  torch.Tensor,   # [B, max_active]  bool
+        prior_mask:   torch.Tensor,   # [B, max_prior]   bool
+    ) -> torch.Tensor:                # [B]
+        """
+        prompt_attention_mask kaldırıldı — forward içinde kullanılmıyordu.
+        attention_mask sekans uzunluğuna göre sıfırdan oluşturulur.
+        """
         device = prompt_ids.device
         B      = prompt_ids.shape[0]
 
@@ -113,17 +149,19 @@ class LLMDelayRegressor(nn.Module):
         z_st3    = self._embed_ids(st3_ids)       # [B, s3, H]
         z_st4    = self._embed_ids(st4_ids)       # [B, s4, H]
 
-        # ── Trajectory projection: traj_dim → hidden_size ────────────
+        # ── Trajectory projection: traj_dim → hidden_size ─────────────
         z_f = self.adapter(focusing_emb).unsqueeze(1)   # [B, 1, H]
         z_a = self.adapter(active_embs)                  # [B, max_active, H]
         z_p = self.adapter(prior_embs)                   # [B, max_prior,  H]
 
-
+        # ── Sekans birleştirme (sample başına) ────────────────────────
+        # batch_size=1 için Python loop overhead'i ihmal edilebilir.
+        # Batch büyüyünce burayı vectorize etmek ilk optimizasyon noktasıdır.
         batch_embeds: list[torch.Tensor] = []
 
         for i in range(B):
-            aa = z_a[i][active_mask[i]]   # [n_active_i, H] — sıfır da olabilir
-            pp = z_p[i][prior_mask[i]]    # [n_prior_i,  H] — sıfır da olabilir
+            aa = z_a[i][active_mask[i]]   # [n_active_i, H]
+            pp = z_p[i][prior_mask[i]]    # [n_prior_i,  H]
 
             seq = torch.cat(
                 [
@@ -140,7 +178,7 @@ class LLMDelayRegressor(nn.Module):
             )
             batch_embeds.append(seq)
 
-        # ── Sağdan padding ile batch tensor'u ────────────────────────
+        # ── Sağdan padding ile batch tensor ───────────────────────────
         max_len     = max(s.shape[0] for s in batch_embeds)
         hidden_size = batch_embeds[0].shape[1]
 
@@ -153,15 +191,18 @@ class LLMDelayRegressor(nn.Module):
             inputs_embeds[i,  :L] = seq
             attention_mask[i, :L] = 1
 
-        # ── Backbone forward ─────────────────────────────────────────
+        # ── Backbone forward ──────────────────────────────────────────
         outputs = self._backbone(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             return_dict=True,
         )
 
-        last_hidden = outputs.last_hidden_state                          # [B, max_len, H]
-        last_idx    = attention_mask.sum(dim=1) - 1                     # [B]
-        h           = last_hidden[torch.arange(B, device=device), last_idx]  # [B, H]
+        # ── Son geçerli token hidden state → skaler ───────────────────
+        # Causal LLM: son token, kendinden önceki tüm sekansı görmüştür.
+        # Alternatif ileride: mean pooling veya özel [REG] token.
+        last_hidden = outputs.last_hidden_state                                # [B, max_len, H]
+        last_idx    = attention_mask.sum(dim=1) - 1                           # [B]
+        h           = last_hidden[torch.arange(B, device=device), last_idx]   # [B, H]
 
         return self.reg_head(h)   # [B]
