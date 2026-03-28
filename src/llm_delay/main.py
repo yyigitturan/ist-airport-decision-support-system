@@ -14,7 +14,7 @@ if __name__ == "__main__":
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    month_dir = Path("data/model/splits/monthly/2025-03")
+    month_dir = Path("data/model/splits/monthly/2025-06")
 
     results = train_one_month(
         cfg,
