@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/License-MIT-green" />
 </p>
 
-> **Undergraduate Thesis Project** · Department of Statistics, Hacettepe University  
+> **Undergraduate Final Project** · Department of Statistics, Hacettepe University  
 > **Author:** Yaşar Yiğit Turan · **Supervisor:** Prof. Dr. Serpil Aktaş Altunay
 
 ---
