@@ -279,7 +279,6 @@ ADS-B data processing uses the [OpenSky Network](https://opensky-network.org/) d
 |---|---|
 | **Email** | yasaryigitturan@gmail.com |
 | **LinkedIn** | [yaşar-yiğit-turan](https://www.linkedin.com/in/yaşar-yiğit-turan-/) |
-| **GitHub** | [@yyigitturan](https://github.com/yyigitturan) |
 
 ---
 
