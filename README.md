@@ -24,8 +24,6 @@
 - [ATSCC — Self-Supervised Trajectory Representation](#3-atscc--self-supervised-trajectory-representation)
 - [Multimodal LLM Regressor](#4-multimodal-llm-regressor)
 - [Results](#results)
-- [Quick Start](#quick-start)
-- [Repository Structure](#repository-structure)
 - [Dependencies](#dependencies)
 - [Acknowledgements](#acknowledgements)
 - [Citation](#citation)
@@ -165,7 +163,7 @@ The **ATC Self-Supervised Contrastive Classifier (ATSCC)** is a causal transform
 </p>
 
 The pretrained ATSCC encoder is available on Hugging Face:  
-🤗 [yasar-yigit-turan/atscc-trajectory-ist-airport-encoder](https://huggingface.co/yasar-yigit-turan/atscc-trajectory-ist-airport-encoder)
+🤗 | **HuggingFace** | [atscc-trajectory-ist-airport-encoder](https://huggingface.co/yyigitturan/atscc-trajectory-ist-airport-encoder) |
 
 ---
 
@@ -258,112 +256,6 @@ Monthly out-of-sample prediction performance on the radar-to-landing duration re
 
 ---
 
-## Quick Start
-
-### Installation
-
-```bash
-git clone https://github.com/yyigitturan/ist-airport-decision-support-system
-cd ist-airport-decision-support-system
-pip install -r requirements.txt
-```
-
-### 1. Train ATSCC (Trajectory Encoder)
-
-```python
-from src.modeling.atscc_training import ATSCCConfig, train
-
-cfg = ATSCCConfig(
-    traj_path    = "data/gold/trajectories/trajectory_gold.parquet",
-    out_dir      = "artifacts/atscc_checkpoints",
-    n_flights    = 100_000,
-    flight_types = {"arrival", "departure"},
-    d_model      = 192,
-    n_head       = 8,
-    n_layer      = 4,
-    d_ff         = 768,
-    d_out        = 256,
-    dropout      = 0.25,
-    random_mask_prob = 0.15,
-    drop_path_rate   = 0.10,
-    lr           = 7e-6,
-    epochs       = 40,
-    patience     = 8,
-    temperature  = 0.10,
-)
-history = train(cfg)
-print(history.tail(10).to_string(index=False))
-```
-
-### 2. Extract Trajectory Embeddings
-
-```python
-import numpy as np
-from src.modeling.atscc_training import load_model, load_trajectories, extract_embeddings
-
-# Load best checkpoint
-model, cfg = load_model("artifacts/atscc_checkpoints/atscc_best.pt", device="cpu")
-
-# Load trajectories (same subset/split as training)
-cfg.traj_path = "data/gold/trajectories/trajectory_gold.parquet"
-flight_groups = load_trajectories(cfg)
-
-all_ids = np.array(sorted(flight_groups.keys()))
-flight_ids = all_ids.tolist()
-
-# Extract 256-dim embeddings
-emb_df = extract_embeddings(model, flight_groups, flight_ids, cfg)
-# emb_df columns: ["flight_id", "emb"]  — emb is np.array of shape (256,)
-print(emb_df.head())
-print(f"Total embeddings: {len(emb_df)}")
-```
-
-### 3. Train Multimodal LLM Regressor (single month)
-
-```python
-from pathlib import Path
-from transformers import AutoTokenizer
-from src.modeling.llm_regressor.config import TrainConfig
-from src.modeling.llm_regressor.train import train_one_month
-
-cfg = TrainConfig(
-    model_name       = "Qwen/Qwen2.5-0.5B-Instruct",
-    llm_hidden_dim   = 896,
-    traj_dim         = 256,
-    num_epochs       = 10,
-    loss_type        = "mse",
-    scale_target     = True,
-    use_weather      = True,
-    output_root      = "artifacts/llm_delay_qwen",
-    early_stopping_patience = 3,
-)
-
-tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, use_fast=True)
-if tokenizer.pad_token_id is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-month_dir = Path("data/model/splits/monthly/2025-06")
-results   = train_one_month(cfg, month_dir, tokenizer)
-print(results)
-```
-
-### 4. Train All Months
-
-```python
-from src.modeling.llm_regressor.config import TrainConfig
-from src.modeling.llm_regressor.train import train_all_months
-
-cfg = TrainConfig(
-    model_name  = "Qwen/Qwen2.5-0.5B-Instruct",
-    output_root = "artifacts/llm_delay_qwen",
-    use_weather = True,
-)
-results_df = train_all_months(cfg)
-print(results_df[["month", "mae", "rmse", "r2"]].to_string(index=False))
-```
-
----
-
 
 ## Dependencies
 
@@ -414,7 +306,7 @@ The self-supervised contrastive learning objective for trajectory segmentation i
 |---|---|
 | **Email** | yasaryigitturan@gmail.com |
 | **LinkedIn** | [yaşar-yiğit-turan](https://www.linkedin.com/in/yaşar-yiğit-turan-/) |
-| **HuggingFace** | [atscc-trajectory-ist-airport-encoder](https://huggingface.co/yasar-yigit-turan/atscc-trajectory-ist-airport-encoder) |
+| **HuggingFace** | [atscc-trajectory-ist-airport-encoder](https://huggingface.co/yyigitturan/atscc-trajectory-ist-airport-encoder) |
 
 ---
 
