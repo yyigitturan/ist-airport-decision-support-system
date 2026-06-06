@@ -125,6 +125,8 @@ The **ATC Self-Supervised Contrastive Classifier (ATSCC)** is a causal transform
 
 **Architecture:**
 
+<img width="423" height="345" alt="image" src="https://github.com/user-attachments/assets/6615b65a-cfd8-491b-b9fa-526493510484" />
+
 
 
 **Key design decisions:**
